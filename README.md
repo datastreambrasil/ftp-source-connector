@@ -18,6 +18,7 @@ Each file is read line by line, and each line is sent as an independent Kafka re
   - A structured `JSON` (`Schema + Struct`)
 - Optional field mapping via `ftp.file.headers`
 - Optional Kafka key based on one or more fields (`ftp.kafka.key.field`)
+- Limit records returned per poll (`ftp.max.records.per.poll`)
 - Moves files to:
   - A staging folder before processing
   - An archive folder after processing
@@ -48,6 +49,7 @@ Each file is read line by line, and each line is sent as an independent Kafka re
     "ftp.file.headers": "type,date,time,code,value",
     "ftp.kafka.key.field": "type+code",
     "ftp.poll.interval.ms": "10000",
+    "ftp.max.records.per.poll": "1000",
     "topic": "ftp-data-topic",
     "tasks.max": "1"
   }

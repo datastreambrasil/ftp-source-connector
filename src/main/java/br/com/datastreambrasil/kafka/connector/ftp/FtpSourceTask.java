@@ -31,6 +31,13 @@ public class FtpSourceTask extends SourceTask {
     protected String tokenizer;
     private String keyFieldName;
     private long pollInterval;
+    private int maxRecordsPerPoll;
+
+    private BufferedReader currentReader;
+    private InputStream currentStream;
+    private String currentFilename;
+    private String currentStagedPath;
+    private long linesProcessed;
     protected List<String> fieldHeaders;
 
     @Override
@@ -48,6 +55,8 @@ public class FtpSourceTask extends SourceTask {
         this.tokenizer = props.getOrDefault(FtpSourceConnector.FTP_FILE_TOKENIZER, ";");
         this.keyFieldName = props.getOrDefault(FtpSourceConnector.FTP_KAFKA_KEY_FIELD, "").trim();
         this.pollInterval = Long.parseLong(props.getOrDefault(FtpSourceConnector.FTP_POLL_INTERVAL, "10000"));
+        this.maxRecordsPerPoll = Integer.parseInt(
+                props.getOrDefault(FtpSourceConnector.FTP_MAX_RECORDS_PER_POLL, "1000"));
 
         String headersConfig = props.getOrDefault(FtpSourceConnector.FTP_FILE_HEADERS, "").trim();
         this.fieldHeaders = headersConfig.isEmpty()
@@ -62,6 +71,12 @@ public class FtpSourceTask extends SourceTask {
             }
             this.client.connect();
             log.info("Connected to {} server", protocol.toUpperCase());
+
+            this.currentReader = null;
+            this.currentStream = null;
+            this.currentFilename = null;
+            this.currentStagedPath = null;
+            this.linesProcessed = 0;
         } catch (Exception e) {
             log.error("Failed to connect to remote server", e);
             throw new ConnectException("Failed to connect to remote server", e);
@@ -73,60 +88,82 @@ public class FtpSourceTask extends SourceTask {
         List<SourceRecord> records = new ArrayList<>();
 
         try {
-            log.info("Polling files from directory: {}", directory);
-            List<String> files = client.listFiles(directory, filePattern);
-
-            for (String file : files) {
-                String filename = file.substring(file.lastIndexOf("/") + 1);
-                String stagedPath = stageDir + "/" + filename;
-
-                log.info("Staging file: {} → {}", file, stagedPath);
-                client.moveFile(file, stagedPath);
-
-                try (InputStream is = client.retrieveFileStream(stagedPath);
-                        BufferedReader reader = new BufferedReader(new InputStreamReader(is, fileEncoding))) {
-
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        Map<String, String> sourcePartition = Collections.singletonMap("file", filename);
-                        Map<String, Long> sourceOffset = Collections.singletonMap("position",
-                                System.currentTimeMillis());
-
-                        RecordModel record = buildRecordModel(line);
-                        Object value = record.value;
-                        Schema schema = record.schema;
-
-                        Object recordKey = null;
-                        if ("json".equals(outputFormat) && value instanceof Struct) {
-                            recordKey = buildKafkaKey((Struct) value, keyFieldName);
-                        }
-
-                        records.add(new SourceRecord(
-                                sourcePartition,
-                                sourceOffset,
-                                topic,
-                                Schema.OPTIONAL_STRING_SCHEMA,
-                                recordKey != null ? recordKey.toString() : null,
-                                schema,
-                                value));
-                    }
-
-                } catch (Exception ex) {
-                    log.error("Error while reading file: {}", stagedPath, ex);
-                    throw new ConnectException("Error while reading file: " + stagedPath, ex);
+            if (currentReader == null) {
+                log.info("Polling files from directory: {}", directory);
+                List<String> files = client.listFiles(directory, filePattern);
+                if (files.isEmpty()) {
+                    Thread.sleep(pollInterval);
+                    return records;
                 }
 
-                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmssSSS");
-                String timestamp = LocalDateTime.now().format(formatter);
-                String archiveFilename = filename.replaceAll("(\\.\\w+)$", "_" + timestamp + "$1");
-                String archivedPath = archiveDir + "/" + archiveFilename;
+                String file = files.get(0);
+                currentFilename = file.substring(file.lastIndexOf('/') + 1);
+                currentStagedPath = stageDir + "/" + currentFilename;
 
+                log.info("Staging file: {} → {}", file, currentStagedPath);
+                client.moveFile(file, currentStagedPath);
+
+                currentStream = client.retrieveFileStream(currentStagedPath);
+                currentReader = new BufferedReader(new InputStreamReader(currentStream, fileEncoding));
+                linesProcessed = 0;
+            }
+
+            boolean eof = false;
+            String line = null;
+            while (records.size() < maxRecordsPerPoll && (line = currentReader.readLine()) != null) {
+                Map<String, String> sourcePartition = Collections.singletonMap("file", currentFilename);
+                Map<String, Long> sourceOffset = Collections.singletonMap("position", System.currentTimeMillis());
+
+                RecordModel record = buildRecordModel(line);
+                Object value = record.value;
+                Schema schema = record.schema;
+
+                Object recordKey = null;
+                if ("json".equals(outputFormat) && value instanceof Struct) {
+                    recordKey = buildKafkaKey((Struct) value, keyFieldName);
+                }
+
+                records.add(new SourceRecord(
+                        sourcePartition,
+                        sourceOffset,
+                        topic,
+                        Schema.OPTIONAL_STRING_SCHEMA,
+                        recordKey != null ? recordKey.toString() : null,
+                        schema,
+                        value));
+
+                linesProcessed++;
+                if (linesProcessed % 10000 == 0) {
+                    log.info("Processed {} lines from {}", linesProcessed, currentFilename);
+                }
+            }
+
+            if (line == null) {
+                eof = true;
+            }
+
+            if (eof) {
+                if (currentReader != null)
+                    currentReader.close();
                 if (client instanceof FtpRemoteClient ftp) {
                     ftp.completePending();
                 }
+                if (currentStream != null)
+                    currentStream.close();
 
-                log.info("Archiving file: {} → {}", stagedPath, archivedPath);
-                client.moveFile(stagedPath, archivedPath);
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmssSSS");
+                String timestamp = LocalDateTime.now().format(formatter);
+                String archiveFilename = currentFilename.replaceAll("(\\.\\w+)$", "_" + timestamp + "$1");
+                String archivedPath = archiveDir + "/" + archiveFilename;
+
+                log.info("Archiving file: {} → {}", currentStagedPath, archivedPath);
+                client.moveFile(currentStagedPath, archivedPath);
+
+                log.info("Finished processing file {} with {} lines", currentFilename, linesProcessed);
+                currentReader = null;
+                currentStream = null;
+                currentFilename = null;
+                currentStagedPath = null;
             }
 
         } catch (Exception e) {

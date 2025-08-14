@@ -55,6 +55,7 @@ class FtpSourceTaskTest {
         props.put(FtpSourceConnector.FTP_FILE_HEADERS, "tipo,data,hora,code,value");
         props.put(FtpSourceConnector.FTP_KAFKA_KEY_FIELD, "tipo+code");
         props.put(FtpSourceConnector.FTP_POLL_INTERVAL, "0");
+        props.put(FtpSourceConnector.FTP_MAX_RECORDS_PER_POLL, "1000");
         props.put(FtpSourceConnector.TOPIC, "test-topic");
         return props;
     }
@@ -67,7 +68,7 @@ class FtpSourceTaskTest {
 
     private RemoteClient createMockClient(InputStream inputStream) throws Exception {
         RemoteClient mockClient = mock(RemoteClient.class);
-        when(mockClient.listFiles(anyString(), any())).thenReturn(List.of("/stage/test.txt"));
+        when(mockClient.listFiles(anyString(), any())).thenReturn(List.of("/stage/test.txt"), List.of());
         when(mockClient.retrieveFileStream(anyString())).thenReturn(inputStream);
         doNothing().when(mockClient).moveFile(anyString(), anyString());
         return mockClient;
@@ -164,6 +165,25 @@ class FtpSourceTaskTest {
         List<SourceRecord> records = task.poll();
         assertFalse(records.isEmpty());
         assertEquals("WB_284", records.get(0).key());
+    }
+
+    @Test
+    void testPollingInChunks() throws Exception {
+        Map<String, String> cfg = createBaseConfig("json");
+        cfg.put(FtpSourceConnector.FTP_MAX_RECORDS_PER_POLL, "10");
+
+        TestableFtpSourceTask task = new TestableFtpSourceTask();
+        task.injectClient(createMockClient(input));
+        task.start(cfg);
+
+        List<SourceRecord> total = new ArrayList<>();
+        List<SourceRecord> batch;
+        do {
+            batch = task.poll();
+            total.addAll(batch);
+        } while (!batch.isEmpty());
+
+        assertEquals(32, total.size());
     }
 
     @Test

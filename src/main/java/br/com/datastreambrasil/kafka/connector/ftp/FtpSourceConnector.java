@@ -29,6 +29,8 @@ public class FtpSourceConnector extends SourceConnector {
         public static final String FTP_FILE_HEADERS = "ftp.file.headers";
         public static final String FTP_KAFKA_KEY_FIELD = "ftp.kafka.key.field";
 
+        public static final String FTP_MAX_RECORDS_PER_POLL = "ftp.max.records.per.poll";
+
         public static final String FTP_POLL_INTERVAL = "ftp.poll.interval.ms";
 
         public static final String TOPIC = "topic";
@@ -95,6 +97,8 @@ public class FtpSourceConnector extends SourceConnector {
                                                 "Field name from headers to be used as Kafka message key")
                                 .define(FTP_POLL_INTERVAL, ConfigDef.Type.INT, 10000, ConfigDef.Importance.LOW,
                                                 "Polling interval in milliseconds")
+                                .define(FTP_MAX_RECORDS_PER_POLL, ConfigDef.Type.INT, 1000, ConfigDef.Importance.LOW,
+                                                "Maximum number of records returned per poll")
                                 .define(TOPIC, ConfigDef.Type.STRING, ConfigDef.Importance.HIGH,
                                                 "Kafka topic to publish the file data");
         }
